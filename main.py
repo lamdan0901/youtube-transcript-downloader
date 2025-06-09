@@ -1,7 +1,42 @@
 import sys
 import os
 import argparse
+import re
+from urllib.parse import urlparse, parse_qs
 from youtube_transcript_api import YouTubeTranscriptApi
+import pyperclip
+
+def extract_video_id(url_or_id):
+    """Extract video ID from YouTube URL or return the ID if it's already a video ID"""
+    # If it's already a video ID (11 characters, alphanumeric with dashes and underscores)
+    if re.match(r'^[a-zA-Z0-9_-]{11}$', url_or_id):
+        return url_or_id
+
+    # Parse different YouTube URL formats
+    patterns = [
+        r'(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/v\/|m\.youtube\.com\/watch\?v=)([a-zA-Z0-9_-]{11})',
+        r'youtube\.com\/.*[?&]v=([a-zA-Z0-9_-]{11})',
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, url_or_id)
+        if match:
+            return match.group(1)
+
+    # Try using urlparse as a fallback
+    try:
+        parsed_url = urlparse(url_or_id)
+        if parsed_url.hostname in ['www.youtube.com', 'youtube.com', 'm.youtube.com']:
+            query_params = parse_qs(parsed_url.query)
+            if 'v' in query_params:
+                return query_params['v'][0]
+        elif parsed_url.hostname == 'youtu.be':
+            return parsed_url.path.lstrip('/')
+    except Exception:
+        pass
+
+    # If we can't extract a video ID, assume it's already a video ID or invalid
+    return url_or_id
 
 def list_available_languages(video_id):
     """List all available transcript languages for a video"""
@@ -59,6 +94,33 @@ def save_transcript_to_file(transcript, video_id, language, output_file=None):
         return True
     except Exception as e:
         print(f"Error saving transcript to file: {e}")
+        return False
+
+def format_transcript_text(transcript):
+    """Convert transcript data to plain text"""
+    text_lines = []
+    for entry in transcript:
+        # Handle both dictionary-style entries and FetchedTranscriptSnippet objects
+        if hasattr(entry, 'text'):
+            # This is a FetchedTranscriptSnippet object
+            text_lines.append(entry.text)
+        elif isinstance(entry, dict) and 'text' in entry:
+            # This is a dictionary with a 'text' key
+            text_lines.append(entry['text'])
+        else:
+            # Try to convert to string as a fallback
+            text_lines.append(str(entry))
+    return '\n'.join(text_lines)
+
+def copy_transcript_to_clipboard(transcript):
+    """Copy transcript to clipboard"""
+    try:
+        transcript_text = format_transcript_text(transcript)
+        pyperclip.copy(transcript_text)
+        print("Transcript copied to clipboard!")
+        return True
+    except Exception as e:
+        print(f"Error copying to clipboard: {e}")
         return False
 
 def get_transcript(video_id, language, translate_to=None):
@@ -158,14 +220,31 @@ def get_transcript(video_id, language, translate_to=None):
 
 def main():
     parser = argparse.ArgumentParser(description='Download YouTube video subtitles')
-    parser.add_argument('video_id', help='YouTube video ID')
+    parser.add_argument('video_input', help='YouTube video URL or video ID')
     parser.add_argument('--language', '-l', default='en', help='Language code (default: en)')
     parser.add_argument('--translate', '-t', help='Translate to this language code')
     parser.add_argument('--list', '-ls', action='store_true', help='List available languages')
-    parser.add_argument('--output', '-o', help='Output file (default: video_id_language.txt)')
+    parser.add_argument('--output', '-o', help='Output file (default: copy to clipboard)')
+    parser.add_argument('--clipboard', '-c', action='store_true', help='Copy to clipboard (default when no output file specified)')
     args = parser.parse_args()
 
-    video_id = args.video_id
+    # Extract video ID from URL or use as-is if it's already a video ID
+    video_id = extract_video_id(args.video_input)
+
+    # Validate that we have a proper video ID
+    if not re.match(r'^[a-zA-Z0-9_-]{11}$', video_id):
+        print(f"Error: Could not extract a valid video ID from '{args.video_input}'")
+        print("Please provide a valid YouTube URL or 11-character video ID")
+        print("Examples:")
+        print("  python main.py https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        print("  python main.py https://youtu.be/dQw4w9WgXcQ")
+        print("  python main.py dQw4w9WgXcQ")
+        print()
+        print("Note: If your URL contains '&' or other special characters,")
+        print("wrap it in quotes:")
+        print('  python main.py "https://www.youtube.com/watch?v=VIDEO_ID&t=30s"')
+        sys.exit(1)
+
     language = args.language
     translate_to = args.translate
     output_file = args.output
@@ -185,22 +264,20 @@ def main():
         if translate_to and actual_language == translate_to:
             actual_language = translate_to
 
-        # Save to file if output is specified
-        if output_file:
+        # Handle output: clipboard vs file
+        if output_file is None and not args.clipboard:
+            # Default behavior: copy to clipboard when no output file specified
+            copy_transcript_to_clipboard(transcript)
+        elif args.clipboard and output_file is None:
+            # Explicit clipboard request with no output file
+            copy_transcript_to_clipboard(transcript)
+        elif args.clipboard and output_file is not None:
+            # Both clipboard and file requested
+            copy_transcript_to_clipboard(transcript)
             save_transcript_to_file(transcript, video_id, actual_language, output_file)
         else:
-            # Print the transcript to console
-            for entry in transcript:
-                # Handle both dictionary-style entries and FetchedTranscriptSnippet objects
-                if hasattr(entry, 'text'):
-                    # This is a FetchedTranscriptSnippet object
-                    print(f"{entry.text}")
-                elif isinstance(entry, dict) and 'text' in entry:
-                    # This is a dictionary with a 'text' key
-                    print(f"{entry['text']}")
-                else:
-                    # Try to convert to string as a fallback
-                    print(f"{str(entry)}")
+            # Only file output requested
+            save_transcript_to_file(transcript, video_id, actual_language, output_file)
     except Exception as e:
         print(f"Error: {e}")
         print("Try using --list to see available languages for this video")
